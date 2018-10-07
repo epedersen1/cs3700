@@ -62,6 +62,7 @@ class Router:
             self.sockets[network].connect(network)
             self.relations[network] = relation
         return
+
     def does_match(self, daddr, prefix, mask):
         prefix_parts = [int(x) for x in prefix.split('.')]
         daddr_parts = [int(x) for x in daddr.split('.')]
@@ -69,6 +70,7 @@ class Router:
         p = [prefix_parts[i] & mask_parts[i] for i in range(4)]
         d = [daddr_parts[i] & mask_parts[i] for i in range(4)]
         return d[0]==p[0] and d[1]==p[1] and d[2]==p[2] and d[3]==p[3]
+
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
         # TODO
@@ -188,8 +190,8 @@ class Router:
         # TODO
         self.updates.append(packet)
         route = {}
-        route['network'] = packet[MESG]['network']
-        route['netmask'] = packet[MESG]['netmask']
+        route[NTWK] = packet[MESG][NTWK]
+        route[NMSK] = packet[MESG][NMSK]
         route[LPRF] = int(packet[MESG][LPRF])
         route[SORG] = True if packet[MESG][SORG] == 'True' else False
         route[APTH] = len(packet[MESG][APTH])
@@ -216,7 +218,7 @@ class Router:
         # TODO
         msg = []
         for route in self.routes:
-            msg.append({'network':route['network'], 'netmask':route['netmask'], 'peer':route['nextHop']})
+            msg.append({'network':route[NTWK], 'netmask':route[NMSK], 'peer':route['nextHop']})
         self.send_message(packet[DEST], packet[SRCE], 'table', msg)
         return True
 
