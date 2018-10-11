@@ -79,7 +79,17 @@ class Router:
         for route in self.routes:
             if self.does_match(daddr, route[NTWK], route[NMSK]):
                 outroutes.append(route)
-        #print(outroutes)
+        return outroutes
+
+    def get_longest_prefix(self, routes):
+        outroutes = []
+        max_prefix = "0.0.0.0"
+        for route in routes:
+            if route[NMSK] == max_prefix:
+                outroutes.append(route)
+            elif self.is_lower_ip(max_prefix, route[NMSK]):
+                outroutes = [route]
+                max_prefix = route[NMSK]
         return outroutes
 
     def get_shortest_as_path(self, routes):
@@ -154,6 +164,7 @@ class Router:
         routes = self.lookup_routes(daddr)
         # Rules go here
         if routes:
+            routes = self.get_longest_prefix(routes)
             # 1. Highest Preference
             routes = self.get_highest_preference(routes)
             # 2. Self Origin
@@ -171,6 +182,9 @@ class Router:
     def forward(self, srcif, packet):
         """	Forward a data packet	"""
         route = self.get_route(srcif, packet[DEST])
+        #print(route)
+        #print(packet)
+        #print(self.routes)
         if route and (self.relations[srcif] == CUST or self.relations[route['nextHop']] == CUST):
             self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
         else:
