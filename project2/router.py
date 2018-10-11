@@ -52,6 +52,7 @@ class Router:
         self.routes = []
         self.myport = {}
         self.updates = []
+        self.revokes = []
         self.relations = {}
         self.sockets = {}
         for relationship in networks:
@@ -216,6 +217,13 @@ class Router:
     def revoke(self, packet):
         """	handle revoke packets	"""
         # TODO
+        self.revokes.append(packet)
+        for ip in packet[MESG]:
+            print(ip)
+            self.routes = filter(lambda r: r[NTWK] != ip[NTWK] or r[NMSK] != ip[NMSK] or r['nextHop'] != packet[SRCE], self.routes)
+        for neighbor in self.sockets:
+            if neighbor != packet[SRCE]:
+                self.send_message(neighbor, packet[DEST], neighbor, RVKE, packet[MESG])
         return True
 
     def dump(self, packet):
@@ -235,6 +243,8 @@ class Router:
             return self.forward(srcif, packet)
         if packet[TYPE] == DUMP:
             return self.dump(packet)
+        if packet[TYPE] == RVKE:
+            return self.revoke(packet)
         return False
 
     def send_error(self, conn, msg):
