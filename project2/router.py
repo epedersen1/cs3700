@@ -50,6 +50,7 @@ class Router:
 
     def __init__(self, networks):
         self.routes = []
+        self.myport = {}
         self.updates = []
         self.relations = {}
         self.sockets = {}
@@ -177,7 +178,10 @@ class Router:
         """	Forward a data packet	"""
         # TODO
         route = self.get_route(srcif, packet[DEST])
-        self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
+        if route:
+        	self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
+        else:
+            self.send_message(srcif, self.myport[srcif], packet[SRCE], "no route", {})
         return True
 
     def coalesce(self):
@@ -189,6 +193,7 @@ class Router:
         """	handle update packets	"""
         # TODO
         self.updates.append(packet)
+        self.myport[packet[SRCE]] = packet[DEST]
         route = {}
         route[NTWK] = packet[MESG][NTWK]
         route[NMSK] = packet[MESG][NMSK]
@@ -205,7 +210,7 @@ class Router:
         self.routes.append(route)
         for neighbor in self.sockets:
             if neighbor != srcif:
-                self.send_message(packet[DEST], neighbor, UPDT, packet[MESG])
+                self.send_message(neighbor, packet[DEST], neighbor, UPDT, packet[MESG])
         return True
     
     def revoke(self, packet):
@@ -219,7 +224,7 @@ class Router:
         msg = []
         for route in self.routes:
             msg.append({'network':route[NTWK], 'netmask':route[NMSK], 'peer':route['nextHop']})
-        self.send_message(packet[DEST], packet[SRCE], 'table', msg)
+        self.send_message(packet[SRCE], packet[DEST], packet[SRCE], 'table', msg)
         return True
 
     def handle_packet(self, srcif, packet):
@@ -237,13 +242,13 @@ class Router:
         # TODO
         return
 
-    def send_message(self, src, dst, typ, msg):
+    def send_message(self, sendto, src, dst, typ, msg):
         packet = {}
         packet[SRCE] = src
         packet[DEST] = dst
         packet[TYPE] = typ
         packet[MESG] = msg
-        self.sockets[dst].send(json.dumps(packet).encode('utf-8'))
+        self.sockets[sendto].send(json.dumps(packet).encode('utf-8'))
 
     def run(self):
         while True:
