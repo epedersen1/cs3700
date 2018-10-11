@@ -75,7 +75,6 @@ class Router:
 
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
-        # TODO
         outroutes = []
         for route in self.routes:
             if self.does_match(daddr, route[NTWK], route[NMSK]):
@@ -85,7 +84,6 @@ class Router:
 
     def get_shortest_as_path(self, routes):
         """ select the route with the shortest AS Path """
-        # TODO
         outroutes = []
         min_path = 99999
         for route in routes:
@@ -98,7 +96,6 @@ class Router:
             
     def get_highest_preference(self, routes):
         """ select the route with the shortest AS Path """
-        # TODO
         outroutes = []
         max_pref = -1
         for route in routes:
@@ -111,7 +108,6 @@ class Router:
          
     def get_self_origin(self, routes):
         """ select self originating routes """
-        # TODO
         outroutes = []
         for route in routes:
             if route[SORG]:
@@ -120,7 +116,6 @@ class Router:
 
     def get_origin_routes(self, routes):
         """ select origin routes: EGP > IGP > UNK """
-        # TODO
         outroutes = []
         max_orig = -1
         for route in routes:
@@ -155,7 +150,6 @@ class Router:
 
     def get_route(self, srcif, daddr):
         """	Select the best route for a given address	"""
-        # TODO
         peer = None
         routes = self.lookup_routes(daddr)
         # Rules go here
@@ -169,7 +163,6 @@ class Router:
             # 4. EGP > IGP > UNK
             routes = self.get_origin_routes(routes)
             # 5. Lowest IP Address
-            # TODO
             routes = self.get_lowest_ip(routes)
             # Final check: enforce peering relationships
             routes = self.filter_relationships(srcif, routes)
@@ -177,10 +170,9 @@ class Router:
 
     def forward(self, srcif, packet):
         """	Forward a data packet	"""
-        # TODO
         route = self.get_route(srcif, packet[DEST])
-        if route:
-        	self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
+        if route and (self.relations[srcif] == CUST or self.relations[route['nextHop']] == CUST):
+            self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
         else:
             self.send_message(srcif, self.myport[srcif], packet[SRCE], "no route", {})
         return True
@@ -192,7 +184,6 @@ class Router:
 
     def update(self, srcif, packet):
         """	handle update packets	"""
-        # TODO
         self.updates.append(packet)
         self.myport[packet[SRCE]] = packet[DEST]
         route = {}
@@ -210,7 +201,7 @@ class Router:
         route['nextHop'] = srcif
         self.routes.append(route)
         for neighbor in self.sockets:
-            if neighbor != srcif:
+            if neighbor != srcif and (self.relations[srcif] == CUST or self.relations[neighbor] == CUST):
                 self.send_message(neighbor, packet[DEST], neighbor, UPDT, packet[MESG])
         return True
     
@@ -219,16 +210,14 @@ class Router:
         # TODO
         self.revokes.append(packet)
         for ip in packet[MESG]:
-            print(ip)
             self.routes = filter(lambda r: r[NTWK] != ip[NTWK] or r[NMSK] != ip[NMSK] or r['nextHop'] != packet[SRCE], self.routes)
         for neighbor in self.sockets:
-            if neighbor != packet[SRCE]:
+            if neighbor != packet[SRCE] and (self.relations[packet[SRCE]] == CUST or self.relations[neighbor] == CUST):
                 self.send_message(neighbor, packet[DEST], neighbor, RVKE, packet[MESG])
         return True
 
     def dump(self, packet):
         """	handles dump table requests	"""
-        # TODO
         msg = []
         for route in self.routes:
             msg.append({'network':route[NTWK], 'netmask':route[NMSK], 'peer':route['nextHop']})
@@ -246,11 +235,6 @@ class Router:
         if packet[TYPE] == RVKE:
             return self.revoke(packet)
         return False
-
-    def send_error(self, conn, msg):
-        """ Send a no_route error message """
-        # TODO
-        return
 
     def send_message(self, sendto, src, dst, typ, msg):
         packet = {}
