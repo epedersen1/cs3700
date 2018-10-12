@@ -65,13 +65,11 @@ class Router:
             self.relations[network] = relation
         return
 
-    def does_match(self, daddr, prefix, mask):
-        prefix_parts = [int(x) for x in prefix.split('.')]
-        daddr_parts = [int(x) for x in daddr.split('.')]
-        mask_parts = [int(x) for x in mask.split('.')]
-        p = [prefix_parts[i] & mask_parts[i] for i in range(4)]
-        d = [daddr_parts[i] & mask_parts[i] for i in range(4)]
-        return d[0]==p[0] and d[1]==p[1] and d[2]==p[2] and d[3]==p[3]
+    def does_match(self, dest, prefix, mask):
+        dest_num = self.ip2num(dest)
+        prefix_num = self.ip2num(prefix)
+        mask_num = self.ip2num(mask)
+        return (dest_num & mask_num) == (prefix_num & mask_num)
 
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
@@ -83,13 +81,14 @@ class Router:
 
     def get_longest_prefix(self, routes):
         outroutes = []
-        max_prefix = "0.0.0.0"
+        max_prefix = 0
         for route in routes:
-            if route[NMSK] == max_prefix:
+            ipnum = self.ip2num(route[NMSK])
+            if ipnum == max_prefix:
                 outroutes.append(route)
-            elif self.is_lower_ip(max_prefix, route[NMSK]):
+            elif max_prefix < ipnum:
                 outroutes = [route]
-                max_prefix = route[NMSK]
+                max_prefix = ipnum
         return outroutes
 
     def get_shortest_as_path(self, routes):
@@ -136,21 +135,26 @@ class Router:
                 outroutes.append(route)
         return outroutes
 
-    def is_lower_ip(self, ip1, ip2):
-        ip1 = map(int, ip1.split("."))
-        ip2 = map(int, ip2.split("."))
-        for i in range(4):
-            if ip1[i] > ip2[i]:
-                return False
-        return True
+    def ip2num(self, ip):
+        ip = map(int, ip.split("."))
+        return ip[0]*pow(2,24)+ip[1]*pow(2,16)+ip[2]*pow(2,8)+ip[3]
+
+    def num2ip(self, num):
+        ip = ""
+        ip += str(num//pow(2,24)) + "."
+        ip += str((num%pow(2,24))//pow(2,16)) + "."
+        ip += str((num%pow(2,16))//pow(2,8)) + "."
+        ip += str(num%pow(2,8))
+        return ip
 
     def get_lowest_ip(self, routes):
         outroutes = []
-        min_ip = "256.256.256.256"
+        min_ip = self.ip2num("256.256.256.256")
         for route in routes:
-            if self.is_lower_ip(route[NTWK], min_ip):
+            ipnum = self.ip2num(route[NTWK])
+            if min_ip >= ipnum:
                 outroutes = [route]
-                min_ip = route[NTWK]
+                min_ip = ipnum
         return outroutes
 
     def filter_relationships(self, srcif, routes):
@@ -182,19 +186,43 @@ class Router:
     def forward(self, srcif, packet):
         """	Forward a data packet	"""
         route = self.get_route(srcif, packet[DEST])
-        #print(route)
-        #print(packet)
-        #print(self.routes)
         if route and (self.relations[srcif] == CUST or self.relations[route['nextHop']] == CUST):
             self.sockets[route['nextHop']].send(json.dumps(packet).encode('utf-8'))
         else:
             self.send_message(srcif, self.myport[srcif], packet[SRCE], "no route", {})
         return True
 
-    def coalesce(self):
+    def is_adj(self, r1, r2):
+        if r1['nextHop'] != r2['nextHop'] or r1[ORIG] != r2[ORIG] or r1[LPRF] != r2[LPRF] or r1[SORG] != r2[SORG] or r1[APTH] != r2[APTH] or r1[NMSK] != r2[NMSK]:
+            return False
+        ip1 = self.ip2num(r1[NTWK])
+        ip2 = self.ip2num(r2[NTWK])
+        mask = self.ip2num(r1[NMSK])
+        new_mask = mask & (mask-1)
+        return ip1 & mask != ip2 & mask and ip1 & new_mask == ip2 & new_mask
+
+    def coalesce(self, r1, r2):
         """	coalesce any routes that are right next to each other	"""
-        # TODO (this is the most difficult task, save until last)
-        return False
+        route = {}
+        nmsk = self.ip2num(r1[NMSK])
+        new_nmsk = nmsk & (nmsk-1)
+        route[NMSK] = self.num2ip(new_nmsk)
+        route[NTWK] = self.num2ip(self.ip2num(r1[NTWK]) & new_nmsk)
+        route[LPRF] = r1[LPRF]
+        route[SORG] = r1[SORG]
+        route[APTH] = r1[APTH]
+        route[ORIG] = r1[ORIG]
+        route['nextHop'] = r1['nextHop']
+        return route
+
+    def add_to_table(self, route):
+        for r in self.routes:
+            if self.is_adj(route, r):
+                self.add_to_table(self.coalesce(route,r))
+                self.routes.remove(r)
+                return
+        self.routes.append(route)
+
 
     def update(self, srcif, packet):
         """	handle update packets	"""
@@ -204,7 +232,7 @@ class Router:
         route[NTWK] = packet[MESG][NTWK]
         route[NMSK] = packet[MESG][NMSK]
         route[LPRF] = int(packet[MESG][LPRF])
-        route[SORG] = True if packet[MESG][SORG] == 'True' else False
+        route[SORG] = packet[MESG][SORG] == 'True'
         route[APTH] = len(packet[MESG][APTH])
         if packet[MESG][ORIG] == 'IGP':
             route[ORIG] = 2
@@ -213,7 +241,7 @@ class Router:
         else:
             route[ORIG] = 0
         route['nextHop'] = srcif
-        self.routes.append(route)
+        self.add_to_table(route)
         for neighbor in self.sockets:
             if neighbor != srcif and (self.relations[srcif] == CUST or self.relations[neighbor] == CUST):
                 self.send_message(neighbor, packet[DEST], neighbor, UPDT, packet[MESG])
