@@ -15,7 +15,7 @@ def log(string):
 
 MSG_SIZE = 1470
 TIMEOUT = 10
-ACK_RESEND_TIMER = 0.3
+ACK_RESEND_TIMER = 0.2
 
 # Bind to localhost and an ephemeral port
 UDP_IP = "127.0.0.1"
@@ -24,24 +24,19 @@ UDP_PORT = 0
 # Set up the socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
 sock.bind((UDP_IP, UDP_PORT))
-sock.settimeout(TIMEOUT)
+sock.settimeout(ACK_RESEND_TIMER)
 
 # Get port we bound to
 UDP_PORT = sock.getsockname()[1]
 log("[bound] " + str(UDP_PORT))
 
 packets = {}
-
+done = False
 last_ack = ("", "")
 last_ack_time = ""
 
 # Now listen for packets
 while True:
-  if last_ack != ("", "") and time.time() - last_ack_time > ACK_RESEND_TIMER:
-    last_ack_time = time.time()
-    log("[resend last ack]")
-    sock.sendto(last_ack[0], last_ack[1])
-
   # If nothing is ready, we hit the timeout
   try:
     result = sock.recvfrom(MSG_SIZE)
@@ -52,7 +47,6 @@ while True:
 
       # If the EOF flag is set, exit
       if (decoded['eof']):
-        log("[completed]")
         sys.exit(0)
      
       # Check if packet is duplicate
@@ -67,14 +61,16 @@ while True:
       # Check if term packet
       if decoded['id'] < 0:
         log("[recv term packet] id " + str(decoded['id']))
-        packets[decoded['id']] = decoded['data']
         msg = json.dumps({"id": decoded['id'], "ack": decoded['seq']+len(decoded['data'])})
         last_ack = (msg, addr)
         last_ack_time = time.time()
         sock.sendto(msg, addr)
-        final_id = -decoded['id']
-        for i in range(1, final_id):
-          sys.stdout.write(packets[i])
+        if not done:
+          final_id = -decoded['id']
+          done = True
+          sock.settimeout(TIMEOUT)
+          for i in range(1, final_id):
+            sys.stdout.write(packets[i])
           log("[completed]")
         continue
 
@@ -102,5 +98,9 @@ while True:
       log("exiting.")
       sys.exit(0)
   except:
-    log("[error] timeout")
-    sys.exit(0)
+    if done:
+      sys.exit(0)
+    if last_ack != ("", "") and time.time() - last_ack_time > ACK_RESEND_TIMER:
+      last_ack_time = time.time()
+      log("[resend last ack]")
+      sock.sendto(last_ack[0], last_ack[1])
