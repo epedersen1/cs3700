@@ -70,7 +70,7 @@ APPROACH
       sends a termination packet (see above in Packet Composition)
     - Receiver gets termination packet and replies with an ACK and
       writes the data packets to the file
-    - Sender gets the ACK for the termination packet and sends 3
+    - Sender gets the ACK for the termination packet and sends 5
       identical EOF (see above in Packet Composition) packets where 
       the EOF boolean value = true and then quits.
     - Receiver quits as soon as it recieves at least one EOF packet,
@@ -110,7 +110,7 @@ CHALLENGES
       - If the sender only sends 1 EOF packet and it is dropped, 
         receiver can only quit if it times out which is an 
         inefficient solution. To help prevent this inefficiency, we
-        have the sender send 3 identical EOF packets before quitting
+        have the sender send 5 identical EOF packets before quitting
         to increase the likelyhood of at least one of them getting
         through so that the receiver can quit without timing out.
 
