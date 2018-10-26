@@ -42,7 +42,6 @@ APPROACH
     that the sender knows it can send the next packet.
     - If the ID is negative then the receiver knows it is a
       termination packet and keeps it, see below
-      - TODO: ^ be sure that this is implemented
 
 - Handling dropped packets or ACKs:
   - Implemented a TIMEOUT variable for sender
