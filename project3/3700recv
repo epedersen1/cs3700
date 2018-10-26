@@ -1,0 +1,117 @@
+#!/usr/bin/python -u
+#
+# Project 2 Starter Code
+#
+
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+
+def log(string):
+  sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+MSG_SIZE = 1400
+LONG_TIMEOUT = 10
+TIMEOUT = 0.2
+
+# Bind to localhost and an ephemeral port
+UDP_IP = "127.0.0.1"
+UDP_PORT = 0
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind((UDP_IP, UDP_PORT))
+sock.settimeout(TIMEOUT)
+
+# Get port we bound to
+UDP_PORT = sock.getsockname()[1]
+log("[bound] " + str(UDP_PORT))
+
+next_sequence = 0
+last_ack = ("", "")
+can_timeout = False
+packets = {}
+
+def checksum(data):
+  return reduce(lambda x,y: x + y, map(ord, data)) % 3759142
+
+# Now listen for packets
+while True:
+  # If nothing is ready, we hit the timeout
+  try:
+    result = sock.recvfrom(MSG_SIZE)
+    (data, addr) = result
+
+    try:
+      decoded = json.loads(data)
+
+      # If the EOF flag is set, exit
+      if (decoded['eof']):
+        log("[completed]")
+        sys.exit(0)
+     
+      # Check if packet is duplicate
+      if decoded['id'] in packets:
+        msg = json.dumps({"id": decoded['id'], "ack": decoded['sequence'] + len(decoded['data'])})
+        last_ack = (msg, addr)
+        log("[packet ignored] dup, resend ack w/ seq " + str(decoded['sequence']+len(decoded['data'])))
+        sock.sendto(msg, addr)
+        continue
+
+      # Check if the sequence number makes sense
+      if (decoded['sequence'] != next_sequence):
+        log("[packet ignored] seq# mismatch")
+        continue
+    
+      # Check if term packet
+      if decoded['id'] < 0:
+        log("[recv term packet] id " + str(decoded['id']))
+        packets[decoded['id']] = decoded['data']
+        msg = json.dumps({"id": decoded['id'], "ack": decoded['sequence']+len(decoded['data'])})
+        last_ack = (msg, addr)
+        final_id = -decoded['id']
+        for i in range(1, final_id):
+          sys.stdout.write(packets[i])
+          sock.settimeout(LONG_TIMEOUT)
+          can_timeout = True
+        continue
+
+      # If there is data, we accept it and print it out
+      if (decoded['data']):
+        # If we receive data, we assume it's in-order
+        # You will need to do much more here
+       
+        # Check if checksum is correct
+        if decoded['checksum'] != checksum(decoded['data']):
+          log("[packet ignored] checksum mismatch")
+          continue
+       
+        # Record sequence number
+        next_sequence = decoded['sequence'] + len(decoded['data'])
+        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED (in-order)")
+
+      packets[decoded['id']] = decoded['data']
+      # Send back an ack to the sender
+      msg = json.dumps({"id": decoded['id'], "ack": decoded['sequence'] + len(decoded['data'])})
+      last_ack = (msg, addr)
+      if sock.sendto(msg, addr) < len(msg):
+        log("[error] unable to fully send packet")
+
+    except (ValueError, KeyError, TypeError) as e:
+      log("[recv corrupt packet]")
+      log(str(e))
+      raise e
+    except SystemExit:
+      log("exiting.")
+      sys.exit(0)
+  except:
+    if can_timeout:
+      log("[error] timeout")
+      sys.exit(0)
+    else:
+      if last_ack[1] != "":
+        log("[resend ack] spam ack")
+        sock.sendto(last_ack[0], last_ack[1])

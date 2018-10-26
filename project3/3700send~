@@ -1,0 +1,104 @@
+#!/usr/bin/python -u
+#
+# Project 2 Starter Code
+#
+
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+
+MSG_SIZE = 16000
+DATA_SIZE = 15000
+TIMEOUT = 1 
+SEQUENCE = 0
+ID = 1
+LAST_ID = 0
+RTT = 1
+EOF_SPAM = 5
+
+# Bind to localhost and an ephemeral port
+IP_PORT = sys.argv[1]
+UDP_IP = IP_PORT[0:IP_PORT.find(":")]
+UDP_PORT = int(IP_PORT[IP_PORT.find(":")+1:])
+dest = (UDP_IP, UDP_PORT)
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.settimeout(TIMEOUT)
+
+last_time = 0
+last_packet = ""
+message_over = False
+
+def log(string):
+  sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+def checksum(data):
+  return reduce(lambda x,y: x + y, map(ord, data)) % 3759142
+
+def send_packet(data):
+  global SEQUENCE
+  global LAST_ID
+  global last_packet
+  global last_time
+  LAST_ID = ID
+  msg = json.dumps({"sequence": SEQUENCE, "data": data, "ack": False, "eof": False, 'id': ID, 'checksum': checksum(data) if ID > 0 else 0})
+
+  if sock.sendto(msg, dest) < len(msg):
+    log("[error] unable to fully send packet")
+  else:
+    last_time = time.time()
+
+  last_packet = msg
+  SEQUENCE += len(data)
+     
+
+def send_next_packet():
+  global SEQUENCE
+  global ID
+  data = sys.stdin.read(DATA_SIZE)
+  if (len(data) > 0):
+    log("[send data] seq " + str(SEQUENCE) + " id " + str(ID)  + " (" + str(len(data)) + ")")
+    send_packet(data)
+    ID = ID + 1
+    return True
+  else:
+    ID = -ID
+    log("[send term] " + str(SEQUENCE))
+    send_packet(data)
+    return False
+
+# Send first packet
+send_next_packet()
+
+# Now read in data, send packets
+while True:
+  try:
+    result = sock.recvfrom(MSG_SIZE)
+    (data, addr) = result
+    try:
+      decoded = json.loads(data)
+      # If there is an ack, send next packet
+      if decoded['ack'] == SEQUENCE and decoded['id'] == LAST_ID:
+        log("[recv ack]")
+        RTT = time.time() - last_time
+        TIMEOUT = TIMEOUT*0.8 + RTT*2*0.2
+        if message_over:
+            break
+
+        # Try to send next packet; break if no more data
+        if (not send_next_packet()):
+          message_over = True
+    except (ValueError, KeyError, TypeError):
+      log("[recv corrupt packet]")
+  except:
+    log("[resend last packet]")
+    sock.sendto(last_packet, dest)
+
+eof_msg = json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False, 'id': ID, 'checksum': 0})
+for i in range(EOF_SPAM):
+  sock.sendto(eof_msg, dest)
+sys.exit(0)
