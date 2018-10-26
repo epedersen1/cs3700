@@ -10,14 +10,14 @@ import datetime
 import select
 import json
 
-MSG_SIZE = 16000
-DATA_SIZE = 15000
-TIMEOUT = 1 
-SEQUENCE = 0
+MSG_SIZE = 1470
+DATA_SIZE = 1350
+TIMEOUT = 2
+SEQ = 0
 ID = 1
-LAST_ID = 0
-RTT = 1
 EOF_SPAM = 5
+MAX_OUT = 100
+MAX_RESEND = 5
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -29,76 +29,102 @@ dest = (UDP_IP, UDP_PORT)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
 sock.settimeout(TIMEOUT)
 
-last_time = 0
-last_packet = ""
 message_over = False
+
+packets_out = {}
+
+term_packet = ""
+term_id = 0
 
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
-def checksum(data):
-  return reduce(lambda x,y: x + y, map(ord, data)) % 3759142
 
 def send_packet(data):
-  global SEQUENCE
-  global LAST_ID
-  global last_packet
-  global last_time
-  LAST_ID = ID
-  msg = json.dumps({"sequence": SEQUENCE, "data": data, "ack": False, "eof": False, 'id': ID, 'checksum': checksum(data) if ID > 0 else 0})
+  global SEQ
+  global packets_out
+  msg = json.dumps({"seq": SEQ, "data": data, "ack": False, "eof": False, 'id': ID})
 
   if sock.sendto(msg, dest) < len(msg):
     log("[error] unable to fully send packet")
-  else:
-    last_time = time.time()
 
-  last_packet = msg
-  SEQUENCE += len(data)
-     
+  SEQ += len(data)
+  packets_out[ID] = (msg, time.time(), SEQ, len(data))
 
+def send_term_packet():
+  global term_packet
+  global term_id
+  msg = json.dumps({"seq": SEQ, "data": "", "ack": False, "eof": False, 'id': -ID})
+  term_packet = msg
+  term_id = -ID
+  sock.sendto(msg, dest)
+
+# Returns true if there is more data to send
 def send_next_packet():
-  global SEQUENCE
   global ID
+  global message_over
+  if message_over:
+      return False
   data = sys.stdin.read(DATA_SIZE)
   if (len(data) > 0):
-    log("[send data] seq " + str(SEQUENCE) + " id " + str(ID)  + " (" + str(len(data)) + ")")
+    log("[send data] seq " + str(SEQ) + " (" + str(len(data)) + ")")
     send_packet(data)
     ID = ID + 1
     return True
-  else:
-    ID = -ID
-    log("[send term] " + str(SEQUENCE))
-    send_packet(data)
+  elif len(packets_out) == 0:
+    log("[send term]")
+    send_term_packet()
+    message_over = True
     return False
+  return False
 
 # Send first packet
-send_next_packet()
+for i in range(MAX_OUT):
+  if (not send_next_packet()):
+    break
 
 # Now read in data, send packets
 while True:
+  cnt = 0
+  for i, p in packets_out.iteritems():
+    if time.time() - p[1] > TIMEOUT:
+      cnt += 1
+      log(str(p))
+      log("[send data] seq " + str(p[2]) + " (" + str(p[3]) + ")")
+      sock.sendto(p[0], dest)
+      packets_out[i] = (p[0], time.time(), p[2], p[3])
+      if cnt >= MAX_RESEND:
+          break
+
   try:
     result = sock.recvfrom(MSG_SIZE)
     (data, addr) = result
     try:
       decoded = json.loads(data)
+      log(data) 
       # If there is an ack, send next packet
-      if decoded['ack'] == SEQUENCE and decoded['id'] == LAST_ID:
-        log("[recv ack]")
-        RTT = time.time() - last_time
-        TIMEOUT = TIMEOUT*0.8 + RTT*2*0.2
-        if message_over:
-            break
+      if decoded['id'] in packets_out:
+        log("[recv ack] " + str(decoded['ack']))
+        del packets_out[decoded['id']]
+        # Try to send next packet
+        send_next_packet()
 
-        # Try to send next packet; break if no more data
-        if (not send_next_packet()):
-          message_over = True
+      if term_id != 0 and decoded['id'] == term_id:
+        log("[recv term ack]")
+        break
     except (ValueError, KeyError, TypeError):
       log("[recv corrupt packet]")
   except:
-    log("[resend last packet]")
-    sock.sendto(last_packet, dest)
+    if message_over:
+      log("[resend term]")
+      sock.sendto(term_packet, dest)
+    else:
+      log("[timeout]")
 
-eof_msg = json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False, 'id': ID, 'checksum': 0})
+eof_msg = json.dumps({"eof": True, "data": "", "seq": 0, "ack": False, 'id': 0})
 for i in range(EOF_SPAM):
   sock.sendto(eof_msg, dest)
+  log("[send eof]")
+
+log("[completed]")
 sys.exit(0)
