@@ -6,7 +6,7 @@ APPROACH
 - Packet composition:
   - Data:
     - fragmented chunk of data with a max size of MSS global variable
-    - Data is empty if this packet is a termination packet
+    - Data is empty if this packet is an EOF packet
   - ID:
     - starts at 1, incremented by 1 for each packet containing data
     - termination packet ID = -(max data packet id)
@@ -22,68 +22,67 @@ APPROACH
   - ID:
     - equal to the ID of the last data or termination packet received
   - SN:
-    - equal to the SN of the last data or termination packet received
+    - equal to the addition of the last received packet's SN + last
+      received packet's data length
 
 - Overview:
-  - Sender sends one packet at a time, waiting for an ACK with an
-    ID and SN value equivalent to the last packet sent before it
-    sends the next packet.
-  - receiver gets a packet, checks that it was the expected packet, 
-    checks it for data corruption and then sends back an ACK for that
-    packet at regular short intervals until it gets the next packet.
+  - Sender sends 100 packets at a time, waits for ACKs wich indicate
+    which packets were received, and then the sender takes the 
+    confirmed packets out of the packets to send and sends another
+    100 packets (replacing the received packets with whatever packets
+    overflowed the first 100 sent).
+  - receiver gets the packets, checks that it was the expected packet
+    and  sends ACKs back for the packets they have received at regular
+    short intervals until it gets the next group of packets.
+  - when receiver gets a termination packet, it 
 
 - Handling duplicates:
   - Assigned each packet an ID value that starts at 1 for the first
     packet and gets incremented by 1 for each of the following
     packets with data.
-  - receiver keeps note of the last packet's ID and if the new packet
-    is not the last packet's ID + 1 then it discards the packet as a
-    duplicate but still returns an ACK for the duplicated packet so
-    that the sender knows it can send the next packet.
-    - If the ID is negative then the receiver knows it is a
-      termination packet and keeps it, see below
+  - receiver keeps note of the IDs of all the received packets and
+    checks to make sure that the ID of the new packet hasn't already
+    been received. If it is a duplicate, then it discards the packet
+    but still returns an ACK for the duplicated packet to make sure
+    that the sender knows that packet was received. 
 
 - Handling dropped packets or ACKs:
   - Implemented a TIMEOUT variable for sender
     - sender timeout is used if the first packet is dropped so that
       the sender knows to re-send the packet
-  - After the first packet is received, the sender constantly gets 
-    duplicate ACKs from receiver (for the last received packet) until
-    the receiver has gotten a new packet, in which it will start
-    continuously sending the ACK for the new packet.
+  - After the packets are received, the sender constantly gets 
+    duplicate ACKs from receiver (for the last received packets) 
+    until the receiver has gotten a new packet, in which it will 
+    start continuously sending the ACKs for the new packets.
   - Until the sender gets the first ACK who's ID and SN match the ID 
     and SN of the last packet sent
+  - sender will resend all packets it hasnt received an ACK for.
   - Adjusted our packet size so that it would be large enough to send
     as few packets as possible (to avoid having to wait for timeouts
     constantly in the case of a high drop rate) and small enough so
     that it would not be fragmented by the IP.
 
 - Handling unordered data
-  - Not necessary since the sender only sends one packet at a time
+  - Receiver keeps track of all of the received IDs, when it gets
+    the termination packet, it knows the max ID number it should
+    have. Then it uses the IDs to reorder the packets.
 
 - Handling termination:
   - Implemented a TIMEOUT variable for receiver
     - receiver timeout is used to terminate the receiver program in
       the worst case scenario
   - Double handshake system:
-    - After sender gets an ACK from the last data packet sent, it
-      sends a termination packet (see above in Packet Composition)
+    - After sender sends all the data packets, it sends a 
+      termination packet (see above in Packet Composition)
     - Receiver gets termination packet and replies with an ACK and
-      writes the data packets to the file
+      writes the data packets to the file after confirming that it
+      has received all the data using the ID of the termination
+      packet.
     - Sender gets the ACK for the termination packet and sends 5
       identical EOF (see above in Packet Composition) packets where 
       the EOF boolean value = true and then quits.
-    - Receiver quits as soon as it recieves at least one EOF packet,
-      if none are received then it times out and terminates.
-
-- Error check
-  - We implemented a quick error check which would tell us if the
-    data had been corrupted by having the receiver use the SN to
-    calculate a packet's ID and then check if that ID is = to the 
-    actual ID.
-  - This check would tell us if the data was longer or shorter than
-    it needed to be or if it is the same length and the ID or SN
-    had also been corrupted.
+    - Receiver quits as soon as it confirms all the data has been
+      received and writes to the file.
 
 
 CHALLENGES
@@ -117,7 +116,10 @@ CHALLENGES
 - We had issues trying to check how performant our program is because
   by the time we got to checking performance, everyone was trying to
   test their programs so the server was very slow regardless.
-
+  - Originally we had the sender send one packet at a time and
+    timeout if it didnt get an ACK in a certain period of time. This
+    was not performant so instead we had the sender send 100 packets
+    at a time and keep resending them if acks were not reciprocated.
 
 TEST OVERVIEW
 - We ran our code with the test cases, we saw which cases passed and 
