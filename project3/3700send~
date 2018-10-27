@@ -17,7 +17,7 @@ SEQ = 0
 ID = 1
 EOF_SPAM = 5
 MAX_OUT = 100
-MAX_RESEND = 5
+MAX_RESEND = 10
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -89,8 +89,7 @@ while True:
   for i, p in packets_out.iteritems():
     if time.time() - p[1] > TIMEOUT:
       cnt += 1
-      log(str(p))
-      log("[send data] seq " + str(p[2]) + " (" + str(p[3]) + ")")
+      log("[send data] seq " + str(p[2]-p[3]) + " (" + str(p[3]) + ")")
       sock.sendto(p[0], dest)
       packets_out[i] = (p[0], time.time(), p[2], p[3])
       if cnt >= MAX_RESEND:
