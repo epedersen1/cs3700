@@ -8,29 +8,43 @@ import queue
 import zlib
 import time
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
+from html.parser import HTMLParser
 
 DOMAIN = "fring.ccs.neu.edu"
 PORT = 80
-USERNAME = "001719029"
-PASSWORD = "POYCPNDN"
-THREADS = 200
+USERNAME = sys.argv[1] # "001719029"
+PASSWORD = sys.argv[2] # "POYCPNDN"
+THREADS = 50
 
 server_address = (DOMAIN, PORT)
 
-# Set up the socket
 socks = {}
+secret_flags_count = 0
 
-def csrf(tag):
-    return tag.has_attr('name') and tag['name'] == 'csrfmiddlewaretoken'
+
+class MyHTMLParser(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        attr = dict(attrs)
+        if 'name' in attr and attr['name'] == 'csrfmiddlewaretoken':
+            self.csrf_token = attr['value']
+        if tag == 'a' and 'href' in attr:
+            if not hasattr(self, 'links'):
+                self.links = []
+            self.links.append(attr['href'])
+    def handle_data(self, data):
+        global secret_flags_count
+        if len(data) > 10 and data[:5] == 'FLAG:':
+            secret_flags_count += 1
+            print(data[6:])
 
 
 def login(name, cookies):
     sock = socks[name]
     html = get(name, '/fakebook', cookies)
 
-    soup = BeautifulSoup(html, 'html.parser')
-    csrf_token = soup.find(csrf)['value']
+    parser = MyHTMLParser()
+    parser.feed(html)
+    csrf_token = parser.csrf_token
 
     body = "username=" + USERNAME + "&password=" + PASSWORD + "&csrfmiddlewaretoken=" + csrf_token
     message = "POST /accounts/login/?next=/fakebook/ HTTP/1.1\r\n"
@@ -118,7 +132,6 @@ def get(name, url, cookies):
 
 
 def crawl(name, queue, added):
-
     socks[name] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock = socks[name]
     sock.connect(server_address)
@@ -127,7 +140,7 @@ def crawl(name, queue, added):
 
     login(name, cookies)
 
-    while True:
+    while secret_flags_count < 5:
         url = ''
         q_lock.acquire()
         len_q = queue.qsize()
@@ -139,23 +152,18 @@ def crawl(name, queue, added):
             break
         html = get(name, url, cookies)
 
-        soup = BeautifulSoup(html, 'html.parser')
-        flag = soup.find_all(attrs={"class": "secret_flag"})
-        if flag:
-            print(flag[0].text[6:])
+        parser = MyHTMLParser()
+        parser.feed(html)
+        links = parser.links
 
-        links = soup.findAll('a')
         for link in links:
-            href = link['href']
-            url = urlparse(href)
+            url = urlparse(link)
             added_lock.acquire()
             if url.scheme == '' and url.netloc == '' and not (url.path in added) or \
                 url.scheme == 'http' and url.netloc == DOMAIN and not (url.path in added):
                 len_added = len(added)
                 added[url.path] = 1
                 added_lock.release()
-                # if len_added % 100 == 0:
-                    # print(f'{name} url: {url.path:30}   added: {len_added:5d}')
                 q_lock.acquire()
                 queue.put(url.path)
                 q_lock.release()
@@ -171,9 +179,7 @@ class myThread (threading.Thread):
         self.q = q
         self.added = added
     def run(self):
-        # print("Starting " + self.name)
         crawl(self.name, self.q, self.added)
-        # print("Exiting " + self.name)
 
 
 added = {'/fakebook': 1}
@@ -185,20 +191,11 @@ q_lock = threading.Lock()
 
 threads = []
 
-# Create new threads
 for i in range(THREADS):
    thread = myThread(i, "Thread-"+str(i), queue, added)
    thread.start()
    threads.append(thread)
    time.sleep(1./(i+1))
 
-# Wait for queue to empty
-# while not queue.empty():
-#    pass
-
-# Notify threads it's time to exit
-exitFlag = 1
-
-# Wait for all threads to complete
 for t in threads:
    t.join()
