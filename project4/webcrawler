@@ -18,19 +18,26 @@ THREADS = 50
 
 server_address = (DOMAIN, PORT)
 
+# dictionary to hold sockets for each thread
 socks = {}
+# counts secret flags so program can terminate after 5 flags were found (for efficiency)
 secret_flags_count = 0
 
 
+# class to handle html parsing, sets csrf token and prints secret flags
 class MyHTMLParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attr = dict(attrs)
+        # set the csrf token
         if 'name' in attr and attr['name'] == 'csrfmiddlewaretoken':
             self.csrf_token = attr['value']
+        # create link list for links on page
         if tag == 'a' and 'href' in attr:
+            # if no links have been set yet, create list for links
             if not hasattr(self, 'links'):
                 self.links = []
             self.links.append(attr['href'])
+    # print data marked as 'FLAG' until 5 secret flags are printed
     def handle_data(self, data):
         global secret_flags_count
         if len(data) > 10 and data[:5] == 'FLAG:':
@@ -38,14 +45,18 @@ class MyHTMLParser(HTMLParser):
             print(data[6:])
 
 
+# handles login
 def login(name, cookies):
     sock = socks[name]
+    # make get request to fakebook and return html for user
     html = get(name, '/fakebook', cookies)
 
+    # parse html to find csrf token
     parser = MyHTMLParser()
     parser.feed(html)
     csrf_token = parser.csrf_token
 
+    # build post message to fakebook to log user in using proper csrf token and user credentials
     body = "username=" + USERNAME + "&password=" + PASSWORD + "&csrfmiddlewaretoken=" + csrf_token
     message = "POST /accounts/login/?next=/fakebook/ HTTP/1.1\r\n"
     message += "Host: " + DOMAIN + "\r\n"
@@ -54,33 +65,40 @@ def login(name, cookies):
     message += "Content-Length: " + str(len(body)) + "\r\n\r\n"
     message += body
 
+    # send post request to socket for current thread
     sock.send(message.encode("utf-8"))
 
     header = {}
-    body = ''
 
+    # split and decode response from get request and set status code
     response = sock.recv(4096).decode("utf-8").split("\r\n")
     status_code = response[0].split()[1]
 
+    # if internal service error (status code 500) try logging in again
     if status_code == '500':
         login()
 
-    for i in range(1, len(response)):
-        if response[i] == '':
-            body = response[i+1]
+    # build header dictionary and cookie list from response
+    for r in response[1:]:
+        # empty string marks end of response, or linebreak before raw html -> break loop
+        if r == '':
             break
-        if response[i].split(': ')[0] == 'Set-Cookie':
-            cookies.append(response[i].split(': ')[1].split(';')[0])
+        if r.split(': ')[0] == 'Set-Cookie':
+            cookies.append(r.split(': ')[1].split(';')[0])
             continue
-        header[response[i].split(': ')[0]] = response[i].split(': ')[1]
+        header[r.split(': ')[0]] = r.split(': ')[1]
 
 
+# handles request to get html from a user's page
 def get(name, url, cookies):
     global socks
     sock = socks[name]
+
+    # build message for get request
     message = "GET " + url + " HTTP/1.1\r\nHost: " + DOMAIN + "\r\n"
     message += "Connection: Keep-Alive\r\n"
     message += "Accept-Encoding: gzip\r\n"
+    # add cookies to message if there are any
     if len(cookies):
         message += "Cookie: "
         for c in cookies:
@@ -88,21 +106,27 @@ def get(name, url, cookies):
         message = message[:-2] + "\r\n"
     message += "\r\n"
 
+    # send message to socket for thread
     sock.send(message.encode("utf-8"))
 
+    # try to get response from socket, if no response -> make get request again
     try:
         res = sock.recv(4096)
     except:
         get(name, url, cookies)
 
+    # if response is empty, close current socket, redefine and connect it and rerun get request
     if res == b'':
         sock.close()
         socks[name] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         socks[name].connect(server_address)
         return get(name, url, cookies)
+    # set header and body with response
     header, body = res.split(b'\r\n\r\n')
     header = header.decode("utf-8").split('\r\n')
 
+    # set header dict with keys as attributes and values as attribute values from header and
+    # add new cookies to the cookie list
     headers = {}
     for h in header[1:]:
         if h.split(': ')[0] == 'Set-Cookie':
@@ -110,55 +134,76 @@ def get(name, url, cookies):
             continue
         headers[h.split(': ')[0]] = h.split(': ')[1]
 
+    # if status is 500 -> internal server error, make get request again
     status_code = header[0].split()[1]
     if status_code == '500':
         return get(name, url, cookies)
 
+    # if status is 301 or 302 -> redirect, try request again with url from location value of header
     if status_code == '301' or status_code == '302':
         return get(name, urlparse(headers['Location']).path, cookies)
 
+    # if status code is not 200, 301, 302 or 500; print error message and return (abandon url)
     if status_code != '200':
         print("WTF!! Status Code: " + status_code)
         return ''
 
+    # if response is compressed, unzip body
     if 'Content-Encoding' in headers and headers['Content-Encoding'] == 'gzip':
         body = zlib.decompress(body, 16+zlib.MAX_WBITS)
 
-    if 'Transfer-Encoding' in header and header['Transfer-Encoding'] == 'chunked':
-        print("chunked")
-        print(body)
-
+    # return the decoded body
     return body.decode('utf-8')
 
 
+# function to crawl web on a thread, searching html for each url for secret flags and
+# adding any new url found on page to the search queue
 def crawl(name, queue, added):
+    # make socket for thread, add to socks and connect current thread's socket to server
     socks[name] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock = socks[name]
     sock.connect(server_address)
 
     cookies = []
 
+    # login to fakebook on thread
     login(name, cookies)
 
+    # parse the hmtl for each page on queue to find secret keys and/or links, add any new links to
+    # thread queue and added. Loop breaks if queue is empty or if all secret flags are found
     while secret_flags_count < 5:
         url = ''
+        # lock queue
         q_lock.acquire()
         len_q = queue.qsize()
+
+        # if queue is not empty, set url to next item of queue and remove it from queue
+        # and release queue lock
         if not queue.empty():
             url = queue.get()
             q_lock.release()
+        # else, thread is finished, release lock and break out of crawl, crawling is finished
         else:
             q_lock.release()
             break
+        
+        # for current url in queue, make a get request for the html
         html = get(name, url, cookies)
 
+        # parse html, find links and/or secret flags on page
         parser = MyHTMLParser()
         parser.feed(html)
         links = parser.links
 
+        # for each non-duplicate link, add it to queue
         for link in links:
             url = urlparse(link)
+            # lock added
             added_lock.acquire()
+            
+            # if url is valid and not already in added (not duplicate), add new url to added,
+            # release added lock, lock queue, add url to queue and then release queue lock.
+            # else, nothing to add to queue or added, unlock added
             if url.scheme == '' and url.netloc == '' and not (url.path in added) or \
                 url.scheme == 'http' and url.netloc == DOMAIN and not (url.path in added):
                 len_added = len(added)
@@ -171,31 +216,40 @@ def crawl(name, queue, added):
                 added_lock.release()
 
 
+# class for thread
+# name: Thread name, unique identifier for thread
+# q: thread queue consisting of links that have not yet been checked for secret flags
+# added: dict holding url paths that have already been added to the queue to prevent the thread
+#        from searching the same url twice
 class myThread (threading.Thread):
-    def __init__(self, threadID, name, q, added):
+    def __init__(self, name, q, added):
         threading.Thread.__init__(self)
-        self.threadID = threadID
         self.name = name
         self.q = q
         self.added = added
+    # run calls crawl for the thread
     def run(self):
         crawl(self.name, self.q, self.added)
 
 
+# initialize added and queue with fakebook homepage
 added = {'/fakebook': 1}
 queue = queue.Queue()
 queue.put('/fakebook')
 
+# define locks for added data and queue data
 added_lock = threading.Lock()
 q_lock = threading.Lock()
 
 threads = []
 
+# start 50 threads with initialized added and queue, append to threads list and sleep btw each
 for i in range(THREADS):
-   thread = myThread(i, "Thread-"+str(i), queue, added)
+   thread = myThread("Thread-"+str(i), queue, added)
    thread.start()
    threads.append(thread)
    time.sleep(1./(i+1))
 
+# join threads aka, wait for threads to terminate before program terminates
 for t in threads:
    t.join()
