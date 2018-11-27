@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+
+import sys, socket, select, time, json, random
+
+# Your ID number
+my_id = sys.argv[1]
+
+# The ID numbers of all the other replicas
+replica_ids = sys.argv[2:]
+
+# Connect to the network. All messages to/from other replicas and clients will
+# occur over this socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+sock.connect(my_id)
+
+NUM_REPLICAS = len(replica_ids) + 1
+HEARTBEAT = 0.1
+ELECTION_MIN = 150
+ELECTION_MAX = 300
+
+last = time.time()
+
+state = 'follower'
+leader = 'FFFF'
+term = 0
+votes = 0
+election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
+
+kv_store = {}
+
+while True:
+    if state == 'follower':
+        ready = select.select([sock], [], [], 0.1)[0] 
+        if sock in ready:
+            msg_raw = sock.recv(32768)
+                
+            if len(msg_raw) == 0: continue
+            
+            msg = json.loads(msg_raw)
+            if msg['type'] in ['get', 'put']:
+                res = {'src': my_id, 'dst': msg['src'], 'leader': leader, 'type': 'redirect', 'MID': msg['MID']}
+                sock.send(json.dumps(res))
+
+            if msg['type'] == 'RequestVote' and msg['term'] > term:
+                last = time.time()
+                term = msg['term']
+                leader = msg['src']
+                # print(my_id + ' voted for ' + leader)
+                res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
+                sock.send(json.dumps(res))
+
+            if msg['type'] == 'AppendEntries':
+                last = time.time()
+                if len(msg['entries']) == 0:
+                    term = msg['term']
+                    leader = msg['src']
+
+        elif time.time() - last > election_timeout:
+            term += 1
+            votes = 1
+            state = 'candidate'
+            last = time.time()
+            # print(my_id + ' is a candidate')
+            res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
+            sock.send(json.dumps(res))
+
+    if state == 'candidate':
+        ready = select.select([sock], [], [], 0.1)[0] 
+        if sock in ready:
+            msg_raw = sock.recv(32768)
+                
+            if len(msg_raw) == 0: continue
+            
+            msg = json.loads(msg_raw)
+            
+            if msg['type'] in ['get', 'put']:
+                res = {'src': my_id, 'dst': msg['src'], 'leader': leader, 'type': 'fail', 'MID': msg['MID']}
+                sock.send(json.dumps(res))
+
+            if msg['type'] == 'vote':
+                votes += 1
+                if votes > NUM_REPLICAS / 2:
+                    state = 'leader'
+                    leader = my_id
+                    # print('Elected ' + my_id)
+                    res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'entries': []}
+                    sock.send(json.dumps(res))
+
+            if msg['type'] == 'AppendEntries' and msg['term'] >= term:
+                last = time.time()
+                state = 'follower'
+                leader = msg['src']
+
+        elif time.time() - last > election_timeout:
+            term += 1
+            votes = 1
+            state = 'candidate'
+            election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
+            last = time.time()
+            # print(my_id + ' is a candidate again')
+            res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
+            sock.send(json.dumps(res))
+
+    if state == 'leader':
+        ready = select.select([sock], [], [], 0.1)[0] 
+        if sock in ready:
+            msg_raw = sock.recv(32768)
+                
+            if len(msg_raw) == 0: continue
+            
+            msg = json.loads(msg_raw)    
+            
+            if msg['type'] == 'RequestVote' and msg['term'] > term:
+                last = time.time()
+                state = 'follower'
+                term = msg['term']
+                leader = msg['src']
+                # print(my_id + ' voted for ' + leader)
+                res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
+                sock.send(json.dumps(res))
+
+            if msg['type'] == 'get':
+                key = msg['key']
+                value = kv_store[key] if key in kv_store else ''
+                res = {'src': my_id, 'dst': msg['src'], 'leader': leader, 'type': 'ok', 'MID': msg['MID'], 'value': value}
+                sock.send(json.dumps(res))
+
+            if msg['type'] == 'put':
+                kv_store[msg['key']] = msg['value']
+                res = {'src': my_id, 'dst': msg['src'], 'leader': leader, 'type': 'ok', 'MID': msg['MID']}
+                sock.send(json.dumps(res))
+
+
+        if time.time() - last > HEARTBEAT:
+            last = time.time()
+            res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'entries': []}
+            sock.send(json.dumps(res))
+
