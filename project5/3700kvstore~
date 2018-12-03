@@ -14,7 +14,7 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 NUM_REPLICAS = len(replica_ids) + 1
-HEARTBEAT = 0.1
+HEARTBEAT = 0.01
 ELECTION_MIN = 150
 ELECTION_MAX = 300
 
@@ -26,6 +26,16 @@ term = 0
 votes = 0
 election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
 
+commitIndex = -1
+entries = []
+
+nextIndex = {}
+matchIndex = {}
+for replica in replica_ids:
+    nextIndex[replica] = 0
+    matchIndex[replica] = -1
+
+log = []
 kv_store = {}
 
 while True:
@@ -54,6 +64,22 @@ while True:
                 if len(msg['entries']) == 0:
                     term = msg['term']
                     leader = msg['src']
+                elif msg['term'] < term or (msg['prevLogIndex'] >= 0 and len(log) > msg['prevLogIndex'] and log[msg['prevLogIndex']]['term'] != msg['prevLogTerm']):
+                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'AppendEntriesRes', 'success': False}
+                    sock.send(json.dumps(res))
+                else:
+                    log = log[:msg['prevLogIndex']+1]
+                    log.extend(msg['entries'])
+                    if msg['leaderCommit'] > commitIndex:
+                        for i in range(commitIndex + 1, msg['leaderCommit'] + 1):
+                            cmd = log[i]['command']
+                            kv_store[cmd['key']] = cmd['value']
+                            res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'ok', 'MID': cmd['MID']}
+                            sock.send(json.dumps(res))
+                        commitIndex = msg['leaderCommit']
+                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'AppendEntriesRes', 'success': True, 'matchIndex': len(log)-1}
+                    sock.send(json.dumps(res))
+
 
         elif time.time() - last > election_timeout:
             term += 1
@@ -119,6 +145,27 @@ while True:
                 res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
                 sock.send(json.dumps(res))
 
+            if msg['type'] == 'AppendEntriesRes':
+                replica = msg['src']
+                if msg['success']:
+                    matchIndex[replica] = msg['matchIndex']
+                    nextIndex[replica] = matchIndex[replica] + 1
+                    majority = sorted(matchIndex.values(), reverse=True)[NUM_REPLICAS/2]
+                    if majority > commitIndex and log[majority]['term'] == term:
+                        for i in range(commitIndex + 1, majority + 1):
+                            cmd = log[i]['command']
+                            kv_store[cmd['key']] = cmd['value']
+                            res = {'src': my_id, 'dst': cmd['src'], 'leader': leader, 'type': 'ok', 'MID': cmd['MID']}
+                            sock.send(json.dumps(res))
+                        commitIndex = majority
+                else:
+                    nextIndex[replica] -= 1
+                    res = {'src': my_id, 'dst': replica, 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex}
+                    res['entries'] = log[nextIndex[replica]:]
+                    res['prevLogIndex'] = nextIndex[replica]-1
+                    res['prevLogTerm'] = -1 if res['prevLogIndex'] == -1 else log[res['prevLogIndex']]['term']
+                    sock.send(json.dumps(res))
+
             if msg['type'] == 'get':
                 key = msg['key']
                 value = kv_store[key] if key in kv_store else ''
@@ -126,13 +173,14 @@ while True:
                 sock.send(json.dumps(res))
 
             if msg['type'] == 'put':
-                kv_store[msg['key']] = msg['value']
-                res = {'src': my_id, 'dst': msg['src'], 'leader': leader, 'type': 'ok', 'MID': msg['MID']}
-                sock.send(json.dumps(res))
-
+                log.append({'command': {'key': msg['key'], 'value': msg['value'], 'src': msg['src'], 'MID': msg['MID']}, 'term': term})
 
         if time.time() - last > HEARTBEAT:
+            for replica in replica_ids:
+                res = {'src': my_id, 'dst': replica, 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex}
+                res['entries'] = log[nextIndex[replica]:]
+                res['prevLogIndex'] = nextIndex[replica]-1
+                res['prevLogTerm'] = -1 if res['prevLogIndex'] == -1 else log[res['prevLogIndex']]['term']
+                sock.send(json.dumps(res))
             last = time.time()
-            res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'entries': []}
-            sock.send(json.dumps(res))
 
