@@ -14,11 +14,15 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 NUM_REPLICAS = len(replica_ids) + 1
-HEARTBEAT = 0.01
+HEARTBEAT = 0.04
+LOG_TIME = 0.01
 ELECTION_MIN = 150
 ELECTION_MAX = 300
+MAX_LOG_UPDATE = 100
+MIN_LOG_UPDATE = 1
 
 last = time.time()
+log_last = time.time()
 
 state = 'follower'
 leader = 'FFFF'
@@ -55,8 +59,8 @@ while True:
                 last = time.time()
                 term = msg['term']
                 leader = msg['src']
-                # print(my_id + ' voted for ' + leader)
                 res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
+                print("voted for " + leader)
                 sock.send(json.dumps(res))
 
             if msg['type'] == 'AppendEntries':
@@ -65,7 +69,7 @@ while True:
                     term = msg['term']
                     leader = msg['src']
                 elif msg['term'] < term or (msg['prevLogIndex'] >= 0 and len(log) > msg['prevLogIndex'] and log[msg['prevLogIndex']]['term'] != msg['prevLogTerm']):
-                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'AppendEntriesRes', 'success': False}
+                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'term': term, 'type': 'AppendEntriesRes', 'success': False}
                     sock.send(json.dumps(res))
                 else:
                     log = log[:msg['prevLogIndex']+1]
@@ -77,16 +81,16 @@ while True:
                             res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'ok', 'MID': cmd['MID']}
                             sock.send(json.dumps(res))
                         commitIndex = msg['leaderCommit']
-                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'AppendEntriesRes', 'success': True, 'matchIndex': len(log)-1}
+                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'term': term, 'type': 'AppendEntriesRes', 'success': True, 'matchIndex': len(log)-1}
                     sock.send(json.dumps(res))
 
 
-        elif time.time() - last > election_timeout:
+        if time.time() - last > election_timeout:
             term += 1
             votes = 1
             state = 'candidate'
+            print(my_id + " is a candidate, term: " + str(term))
             last = time.time()
-            # print(my_id + ' is a candidate')
             res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
             sock.send(json.dumps(res))
 
@@ -108,22 +112,26 @@ while True:
                 if votes > NUM_REPLICAS / 2:
                     state = 'leader'
                     leader = my_id
-                    # print('Elected ' + my_id)
+                    nextIndex = {}
+                    matchIndex = {}
+                    for replica in replica_ids:
+                        nextIndex[replica] = len(log)
+                        matchIndex[replica] = -1
                     res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'entries': []}
                     sock.send(json.dumps(res))
 
             if msg['type'] == 'AppendEntries' and msg['term'] >= term:
                 last = time.time()
                 state = 'follower'
-                leader = msg['src']
+                leader = msg['leader']
 
-        elif time.time() - last > election_timeout:
+        if time.time() - last > election_timeout:
             term += 1
             votes = 1
             state = 'candidate'
             election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
+            print(my_id + " is a candidate again, term: " + str(term))
             last = time.time()
-            # print(my_id + ' is a candidate again')
             res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
             sock.send(json.dumps(res))
 
@@ -141,16 +149,21 @@ while True:
                 state = 'follower'
                 term = msg['term']
                 leader = msg['src']
-                # print(my_id + ' voted for ' + leader)
                 res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
                 sock.send(json.dumps(res))
 
             if msg['type'] == 'AppendEntriesRes':
                 replica = msg['src']
-                if msg['success']:
+                if msg['term'] > term:
+                    last = time.time()
+                    state = 'follower'
+                    leader = msg['src']
+                    term = msg['term']
+
+                elif msg['success']:
                     matchIndex[replica] = msg['matchIndex']
                     nextIndex[replica] = matchIndex[replica] + 1
-                    majority = sorted(matchIndex.values(), reverse=True)[NUM_REPLICAS/2]
+                    majority = sorted(matchIndex.values(), reverse=True)[NUM_REPLICAS/2-1]
                     if majority > commitIndex and log[majority]['term'] == term:
                         for i in range(commitIndex + 1, majority + 1):
                             cmd = log[i]['command']
@@ -161,7 +174,8 @@ while True:
                 else:
                     nextIndex[replica] -= 1
                     res = {'src': my_id, 'dst': replica, 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex}
-                    res['entries'] = log[nextIndex[replica]:]
+                    last_entry = min(len(log), nextIndex[replica]+MAX_LOG_UPDATE)
+                    res['entries'] = log[nextIndex[replica]:last_entry]
                     res['prevLogIndex'] = nextIndex[replica]-1
                     res['prevLogTerm'] = -1 if res['prevLogIndex'] == -1 else log[res['prevLogIndex']]['term']
                     sock.send(json.dumps(res))
@@ -174,13 +188,17 @@ while True:
 
             if msg['type'] == 'put':
                 log.append({'command': {'key': msg['key'], 'value': msg['value'], 'src': msg['src'], 'MID': msg['MID']}, 'term': term})
+                for replica in replica_ids:
+                    res = {'src': my_id, 'dst': replica, 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex}
+                    last_entry = min(len(log), nextIndex[replica]+MAX_LOG_UPDATE)
+                    res['entries'] = log[nextIndex[replica]:last_entry]
+                    res['prevLogIndex'] = nextIndex[replica]-1
+                    res['prevLogTerm'] = -1 if res['prevLogIndex'] == -1 else log[res['prevLogIndex']]['term']
+                    sock.send(json.dumps(res))
+                    last = time.time()
 
         if time.time() - last > HEARTBEAT:
-            for replica in replica_ids:
-                res = {'src': my_id, 'dst': replica, 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex}
-                res['entries'] = log[nextIndex[replica]:]
-                res['prevLogIndex'] = nextIndex[replica]-1
-                res['prevLogTerm'] = -1 if res['prevLogIndex'] == -1 else log[res['prevLogIndex']]['term']
-                sock.send(json.dumps(res))
+            res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'leaderCommit': commitIndex, 'entries': []}
+            sock.send(json.dumps(res))
             last = time.time()
 
