@@ -13,6 +13,8 @@ replica_ids = sys.argv[2:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
+PRINT = True
+
 NUM_REPLICAS = len(replica_ids) + 1
 HEARTBEAT = 0.04
 ELECTION_MIN = 150
@@ -43,6 +45,10 @@ command_queue = []
 log = []
 kv_store = {}
 
+def pp(s):
+    if PRINT:
+        print(s)
+
 while True:
     if state == 'follower':
         ready = select.select([sock], [], [], 0.1)[0] 
@@ -55,22 +61,22 @@ while True:
             if msg['type'] in ['get', 'put']:
                 command_queue.append(msg)
 
-            if msg['type'] == 'RequestVote' and msg['term'] > term:
+            if msg['type'] == 'RequestVote':
                 if msg['term'] > term and (len(log) == 0 or msg['lastLogTerm'] > log[-1]['term']  or (msg['lastLogTerm'] == log[-1]['term'] and msg['lastLogIndex'] >= len(log)-1)):
                     last = time.time()
-                    term = msg['term']
                     leader = msg['src']
-                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'vote', 'term': term}
-                    print(my_id + " voted for " + leader)
+                    res = {'src': my_id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote', 'term': term}
+                    pp(my_id + " voted for " + leader)
                     sock.send(json.dumps(res))
                 else:
-                    res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'no-vote', 'term': term}
+                    term = max(term, msg['term'])
+                    res = {'src': my_id, 'dst': leader, 'leader': 'FFFF', 'type': 'no-vote', 'term': term}
                     sock.send(json.dumps(res))
-                    print(my_id + " won't vote for " + msg['src'])
+                    pp(my_id + " won't vote for " + msg['src'])
 
             if msg['type'] == 'AppendEntries':
                 last = time.time()
-                if msg['term'] < term:
+                if msg['term'] > term:
                     term = msg['term']
                     leader = msg['src']
                 if msg['entries'] == []:
@@ -82,9 +88,7 @@ while True:
                     log = log[:msg['prevLogIndex']+1]
                     log.extend(msg['entries'])
                     if msg['leaderCommit'] > commitIndex:
-                        for i in range(commitIndex + 1, msg['leaderCommit'] + 1):
-                            if i >= len(log):
-                                print(msg)
+                        for i in range(commitIndex + 1, min(msg['leaderCommit'] + 1, len(log))):
                             cmd = log[i]['command']
                             kv_store[cmd['key']] = cmd['value']
                             res = {'src': my_id, 'dst': leader, 'leader': leader, 'type': 'ok', 'MID': cmd['MID']}
@@ -103,7 +107,7 @@ while True:
             votes = 1
             state = 'candidate'
             election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
-            print(my_id + " is a candidate, term: " + str(term))
+            pp(my_id + " is a candidate, term: " + str(term))
             last = time.time()
             res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
             res['lastLogIndex'] = len(log)-1
@@ -133,13 +137,30 @@ while True:
                     for replica in replica_ids:
                         nextIndex[replica] = len(log)
                         matchIndex[replica] = -1
-                    print(my_id + " is a leader!")
+                    pp(my_id + " is a leader!")
                     res = {'src': my_id, 'dst': 'FFFF', 'leader': leader, 'type': 'AppendEntries', 'term': term, 'entries': []}
                     sock.send(json.dumps(res))
 
             if msg['type'] == 'no-vote':
                 state = 'follower'
                 term = msg['term']
+
+            if msg['type'] == 'RequestVote':
+                if msg['term'] > term and (len(log) == 0 or msg['lastLogTerm'] > log[-1]['term']  or (msg['lastLogTerm'] == log[-1]['term'] and msg['lastLogIndex'] >= len(log)-1)):
+                    state = 'follower'
+                    last = time.time()
+                    term = msg['term']
+                    res = {'src': my_id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote', 'term': term}
+                    pp('candidate ' + my_id + " voted for " + leader)
+                    sock.send(json.dumps(res))
+                else:
+                    if msg['term'] > term:
+                        state = 'follower'
+                        term = msg['term']
+                        last = time.time()
+                    res = {'src': my_id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'no-vote', 'term': term}
+                    sock.send(json.dumps(res))
+                    pp('candidate ' + my_id + " won't vote for " + msg['src'])
 
             if msg['type'] == 'AppendEntries' and msg['term'] >= term:
                 last = time.time()
@@ -152,7 +173,7 @@ while True:
             votes = 1
             state = 'candidate'
             election_timeout = random.randint(ELECTION_MIN, ELECTION_MAX) / 1000.
-            print(my_id + " is a candidate again, term: " + str(term))
+            pp(my_id + " is a candidate again, term: " + str(term))
             last = time.time()
             res = {'src': my_id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'RequestVote', 'term': term}
             res['lastLogIndex'] = len(log)-1
